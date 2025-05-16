@@ -1,0 +1,81 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# top-most EditorConfig file
+root = true
+
+# Don't use tabs for indentation.
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# C# files
+[*.cs]
+# New line preferences
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_new_line_before_members_in_object_initializers = true
+csharp_new_line_before_members_in_anonymous_types = true
+csharp_new_line_between_query_expression_clauses = true
+
+# Using directive preferences
+csharp_using_directive_placement = outside_namespace_silicon:error
+
+# Namespace preferences
+csharp_style_namespace_declarations = file_scoped:silent
+
+# this. preferences
+csharp_style_qualification_for_field = false:silent
+csharp_style_qualification_for_property = false:silent
+csharp_style_qualification_for_method = false:silent
+csharp_style_qualification_for_event = false:silent
+
+# Expression-level preferences
+csharp_style_deconstructed_variable_declaration = true:silent
+csharp_style_pattern_matching_over_is_with_cast_check = true:silent
+csharp_style_pattern_matching_over_as_with_null_check = true:silent
+csharp_style_inlined_variable_declaration = true:silent
+csharp_style_throw_expression = true:silent
+csharp_style_conditional_delegate_call = true:silent
+
+# Null checking preferences
+csharp_style_conditional_delegate_call = true:silent
+
+# Code-block preferences
+csharp_prefer_braces = true:silent
+
+# Expression-bodied members
+csharp_style_expression_bodied_methods = when_on_single_line:silent
+csharp_style_expression_bodied_constructors = when_on_single_line:silent
+csharp_style_expression_bodied_operators = when_on_single_line:silent
+csharp_style_expression_bodied_properties = true:silent
+csharp_style_expression_bodied_indexers = true:silent
+csharp_style_expression_bodied_accessors = true:silent
+
+# Pattern matching preferences
+csharp_style_pattern_matching_over_is_with_cast_check = true:silent
+csharp_style_pattern_matching_over_as_with_null_check = true:silent
+csharp_style_prefer_switch_expression = true:silent
+csharp_style_prefer_pattern_matching = true:silent
+
+# Variable preferences
+csharp_style_inlined_variable_declaration = true:silent
+csharp_style_implicit_object_creation_when_type_is_apparent = true:silent
+
+# Expression-level preferences
+csharp_prefer_simple_using_statement = true:silent
+csharp_style_prefer_local_over_anonymous_function = true:silent
+csharp_style_prefer_index_operator = true:silent
+csharp_style_prefer_range_operator = true:silent
+csharp_style_implicit_object_creation_when_type_is_apparent = true:silent
+
+# Null checking preferences
+csharp_style_conditional_delegate_call = true:silent
+
+# Code-block preferences
+csharp_prefer_braces = true:silent

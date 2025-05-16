@@ -1,0 +1,45 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Force batch files to use CRLF line endings
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Force shell scripts to use LF line endings
+*.sh text eol=lf
+
+# Binary files that should not be modified
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.eot binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.svg binary
+*.sln binary
+*.suo binary
+*.user binary
+*.userosscache binary
+*.sln.docstates binary
+*.pfx binary
+*.pfx.snk binary
+*.snk binary
+
+# Visual Studio files
+*.user text=auto
+*.userosscache text=auto
+*.sln.docstates text=auto
+*.suo text=auto
+*.userprefs text=auto
+*.DotSettings text=auto
+*.DotSettings.user text=auto
+*.ncrunchsolution text=auto
+*.ncrunchproject text=auto
+*.ncrunchproject.user text=auto
+*.vspscc text=auto
+*.vssscc text=auto
+*.vssscc.user text=auto
