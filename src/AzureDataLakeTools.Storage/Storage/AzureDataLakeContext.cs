@@ -12,7 +12,7 @@ namespace AzureDataLakeTools.Storage;
 /// <summary>
 ///     Provides methods to interact with Azure Data Lake Storage.
 /// </summary>
-public class AzureDataLakeContext
+public class AzureDataLakeContext : IAzureDataLakeContext
 {
     private readonly IConfiguration _configuration;
     private readonly ConcurrentDictionary<string, DataLakeFileSystemClient> _fileSystemClients = new();
@@ -325,11 +325,110 @@ public class AzureDataLakeContext
 
     private static object? GetDefaultValue(Type type)
     {
-        if (type.IsValueType)
+        return type.IsValueType ? Activator.CreateInstance(type) : null;
+    }
+
+    /// <inheritdoc />
+    public async Task<string> UpdateJsonFile<T>(
+        T item,
+        string filePath,
+        string fileSystemName,
+        JsonSerializerSettings? jsonSettings = null)
+    {
+        if (item == null)
         {
-            return Activator.CreateInstance(type);
+            throw new ArgumentNullException(nameof(item));
         }
 
-        return null;
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = await GetOrCreateFileSystemClientAsync(fileSystemName);
+        var fileClient = fileSystemClient.GetFileClient(filePath);
+
+        // Check if file exists
+        if (!await fileClient.ExistsAsync())
+        {
+            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
+        }
+
+        var json = JsonConvert.SerializeObject(
+            item,
+            jsonSettings ?? new JsonSerializerSettings
+            {
+                Formatting = Formatting.Indented,
+                NullValueHandling = NullValueHandling.Ignore
+            });
+
+        using var stream = new MemoryStream();
+        using (var writer = new StreamWriter(stream, leaveOpen: true))
+        {
+            await writer.WriteAsync(json);
+            await writer.FlushAsync();
+            stream.Position = 0;
+
+            // Upload with overwrite set to true
+            await fileClient.UploadAsync(stream, overwrite: true);
+        }
+
+        return fileClient.Path;
+    }
+
+    /// <inheritdoc />
+    public async Task<string> UpdateParquetFile<T>(
+        IEnumerable<T> items,
+        string filePath,
+        string fileSystemName) where T : class
+    {
+        if (items == null)
+        {
+            throw new ArgumentNullException(nameof(items));
+        }
+
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+        }
+
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = await GetOrCreateFileSystemClientAsync(fileSystemName);
+        var fileClient = fileSystemClient.GetFileClient(filePath);
+
+        // Check if file exists
+        if (!await fileClient.ExistsAsync())
+        {
+            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
+        }
+
+        using var stream = new MemoryStream();
+        var schema = CreateSchema<T>();
+        var columns = CreateColumns(items, schema);
+
+        using (var parquetWriter = await ParquetWriter.CreateAsync(schema, stream))
+        {
+            using var groupWriter = parquetWriter.CreateRowGroup();
+
+            foreach (var column in columns)
+            {
+                await groupWriter.WriteColumnAsync(column);
+            }
+        }
+
+        stream.Position = 0;
+        await fileClient.UploadAsync(stream, overwrite: true);
+
+        return fileClient.Path;
     }
 }
