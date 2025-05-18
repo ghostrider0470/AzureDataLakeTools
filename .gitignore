@@ -703,3 +703,12 @@ FodyWeavers.xsd
 .idea/
 *.sln.iml
 *.DotSettings.user
+
+# Application configuration
+appsettings.json
+!appsettings.example.json
+**/appsettings.*.json
+!**/appsettings.example.json
+
+# User secrets
+secrets.json

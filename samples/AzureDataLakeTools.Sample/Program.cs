@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Azure.Storage.Files.DataLake;
 using AzureDataLakeTools.Storage;
 using AzureDataLakeTools.Sample.Models;
 using Microsoft.Extensions.Configuration;
@@ -44,7 +45,7 @@ try
         }
     };
 
-    var jsonFilePath = await dataLakeContext.StoreItemAsJsonAsync(
+    var jsonFilePath = await dataLakeContext.StoreItemAsJson(
         sampleData,
         "samples/json",
         fileSystemName,
@@ -68,7 +69,7 @@ try
         }
     }).ToList();
 
-    var parquetFilePath = await dataLakeContext.StoreItemsAsParquetAsync(
+    var parquetFilePath = await dataLakeContext.StoreItemsAsParquet(
         items,
         "samples/parquet",
         fileSystemName,
@@ -76,23 +77,32 @@ try
     
     Console.WriteLine($"Stored Parquet file at: {parquetFilePath}");
     
-    // Example 3: Check if a file exists
-    Console.WriteLine("\nExample 3: Checking if files exist...");
-    var jsonFileExists = await dataLakeContext.FileExistsAsync("samples/json/sample-data.json", fileSystemName);
-    var parquetFileExists = await dataLakeContext.FileExistsAsync("samples/parquet/sample-data.parquet", fileSystemName);
+    // Example 3: Update the JSON file
+    Console.WriteLine("\nExample 3: Updating the JSON file...");
+    sampleData.Value = 678.90;
+    sampleData.Metadata["Status"] = "Updated";
     
-    Console.WriteLine($"JSON file exists: {jsonFileExists}");
-    Console.WriteLine($"Parquet file exists: {parquetFileExists}");
+    var updatedJsonPath = await dataLakeContext.UpdateJsonFile(
+        sampleData,
+        "samples/json/sample-data.json",
+        fileSystemName);
     
-    // Example 4: List files in a directory
-    Console.WriteLine("\nExample 4: Listing files in directory...");
-    var files = await dataLakeContext.ListFilesAsync("samples", fileSystemName, recursive: true);
+    Console.WriteLine($"Updated JSON file at: {updatedJsonPath}");
     
-    Console.WriteLine("Files in 'samples' directory:");
-    foreach (var file in files)
+    // Example 4: Update the Parquet file
+    Console.WriteLine("\nExample 4: Updating the Parquet file...");
+    var updatedItems = items.Select(i => 
     {
-        Console.WriteLine($"- {file}");
-    }
+        i.Value *= 2; // Double the value for demonstration
+        return i;
+    }).ToList();
+    
+    var updatedParquetPath = await dataLakeContext.UpdateParquetFile(
+        updatedItems,
+        "samples/parquet/sample-data.parquet",
+        fileSystemName);
+    
+    Console.WriteLine($"Updated Parquet file at: {updatedParquetPath}");
     
     return 0;
 }

@@ -5,6 +5,9 @@
     <TargetFramework>net6.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AnalysisLevel>6.0</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
     <RootNamespace>AzureDataLakeTools.Sample</RootNamespace>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
@@ -16,9 +19,6 @@
     <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="6.0.0" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\AzureDataLakeTools.Storage\AzureDataLakeTools.Storage.csproj" />
-  </ItemGroup>
 
   <ItemGroup>
     <None Update="appsettings.json">

@@ -7,16 +7,29 @@
     <Authors>Hamza Abdagic</Authors>
     <Company>AzureDataLakeTools</Company>
     <Description>A .NET library for working with Azure Data Lake Storage, supporting both JSON and Parquet file formats.</Description>
-    <SignAssembly>true</SignAssembly>
-    <AssemblyOriginatorKeyFile>..\..\AzureDataLakeTools.snk</AssemblyOriginatorKeyFile>
+    <SignAssembly>false</SignAssembly>
+    <!-- Strong-name signing is disabled for development -->
+    <!-- <AssemblyOriginatorKeyFile>..\..\AzureDataLakeTools.snk</AssemblyOriginatorKeyFile> -->
     <DelaySign>false</DelaySign>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <AnalysisLevel>6.0</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <DisableImplicitNuGetFallbackFolder>true</DisableImplicitNuGetFallbackFolder>
+  </PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="Azure.Storage.Files.DataLake" Version="12.16.0" />
+    <PackageReference Include="Azure.Storage.Files.DataLake" Version="12.22.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.5" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Parquet.Net" Version="4.10.1" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="6.0.0" />
+    <PackageReference Include="Parquet.Net" Version="5.1.1" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="9.0.5" />
+    <PackageReference Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="6.0.0" PrivateAssets="all" />
+    <PackageReference Update="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+    <PackageReference Update="Microsoft.CodeAnalysis.NetAnalyzers" Version="9.0.0" />
   </ItemGroup>
 
 </Project>

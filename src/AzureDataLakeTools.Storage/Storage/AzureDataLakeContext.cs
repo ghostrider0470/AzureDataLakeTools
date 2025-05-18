@@ -1,34 +1,58 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using Azure.Storage.Files.DataLake;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using Parquet;
 using Parquet.Data;
+using System.Reflection;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Parquet.Data;
 using Parquet.Schema;
 using Array = System.Array;
+using AzureDataLakeTools.Storage.Annotations;
+using AzureDataLakeTools.Storage.Formatters;
+using AzureDataLakeTools.Storage.Formatters.Interfaces;
+using AzureDataLakeTools.Storage.Formatters.Json;
 
 namespace AzureDataLakeTools.Storage;
 
 /// <summary>
 ///     Provides methods to interact with Azure Data Lake Storage.
 /// </summary>
-public class AzureDataLakeContext : IAzureDataLakeContext
+/// <summary>
+/// Provides methods to interact with Azure Data Lake Storage, supporting both JSON and Parquet file formats.
+/// </summary>
+public class AzureDataLakeContext : IAzureDataLakeContext, IDisposable
 {
+    private bool _disposed = false;
     private readonly IConfiguration _configuration;
+    private const int DefaultBufferSize = 81920; // 80KB buffer size for uploading
     private readonly ConcurrentDictionary<string, DataLakeFileSystemClient> _fileSystemClients = new();
     private readonly ConcurrentDictionary<string, DataLakeServiceClient> _serviceClients = new();
+    private readonly ILogger<AzureDataLakeContext> _logger;
+    private readonly IFileFormatter _jsonFormatter;
 
     /// <summary>
     ///     Initializes a new instance of the <see cref="AzureDataLakeContext" /> class.
     /// </summary>
     /// <param name="configuration">The configuration containing the Data Lake connection string.</param>
+    /// <param name="logger">The logger instance.</param>
+    /// <param name="jsonFormatter">Optional. The JSON formatter to use. If not provided, a default one will be created.</param>
+    /// <param name="parquetFormatter">Optional. The Parquet formatter to use. If not provided, a default one will be created.</param>
     /// <exception cref="ArgumentNullException">Thrown when configuration is null.</exception>
-    /// <exception cref="InvalidOperationException">
-    ///     Thrown when the Data Lake connection string is not found in the
-    ///     configuration.
-    /// </exception>
-    public AzureDataLakeContext(IConfiguration configuration)
+    /// <exception cref="InvalidOperationException">Thrown when the Data Lake connection string is not found in the configuration.</exception>
+    public AzureDataLakeContext(
+        IConfiguration configuration, 
+        ILogger<AzureDataLakeContext> logger,
+        IFileFormatter? jsonFormatter = null)
     {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
 
         // Try to get connection string from configuration
@@ -43,6 +67,9 @@ public class AzureDataLakeContext : IAzureDataLakeContext
 
         // Initialize the default service client
         GetOrCreateServiceClient(connectionString);
+        
+        // Initialize formatters
+        _jsonFormatter = jsonFormatter ?? new JsonFileFormatter();
     }
 
     /// <summary>
@@ -69,7 +96,8 @@ public class AzureDataLakeContext : IAzureDataLakeContext
     ///     string.
     /// </param>
     /// <returns>A <see cref="DataLakeFileSystemClient" /> instance.</returns>
-    public Task<DataLakeFileSystemClient> GetOrCreateFileSystemClientAsync(string fileSystemName,
+    public DataLakeFileSystemClient GetOrCreateFileSystemClient(
+        string fileSystemName,
         string? connectionString = null)
     {
         if (string.IsNullOrWhiteSpace(fileSystemName))
@@ -88,20 +116,12 @@ public class AzureDataLakeContext : IAzureDataLakeContext
             return serviceClient.GetFileSystemClient(fileSystemName);
         });
 
-        return Task.FromResult(fileSystemClient);
+        return fileSystemClient;
     }
 
-    /// <summary>
-    ///     Stores an item as a JSON file in Azure Data Lake Storage.
-    /// </summary>
-    /// <typeparam name="T">The type of the item to store.</typeparam>
-    /// <param name="item">The item to store.</param>
-    /// <param name="directoryPath">The directory path where the file will be stored.</param>
-    /// <param name="fileSystemName">The name of the file system.</param>
-    /// <param name="fileName">Optional. The name of the file. If not provided, a GUID will be used.</param>
-    /// <param name="jsonSettings">Optional. The JSON serializer settings.</param>
-    /// <param name="overwrite">Whether to overwrite the file if it already exists.</param>
-    /// <returns>The path to the stored file.</returns>
+    
+
+    /// <inheritdoc />
     public async Task<string> StoreItemAsJson<T>(
         T item,
         string directoryPath,
@@ -125,7 +145,8 @@ public class AzureDataLakeContext : IAzureDataLakeContext
             throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
         }
 
-        var fileSystemClient = await GetOrCreateFileSystemClientAsync(fileSystemName);
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
         var directoryClient = fileSystemClient.GetDirectoryClient(directoryPath);
         await directoryClient.CreateIfNotExistsAsync();
 
@@ -137,197 +158,16 @@ public class AzureDataLakeContext : IAzureDataLakeContext
 
         var fileClient = directoryClient.GetFileClient(fileName);
 
-        var json = JsonConvert.SerializeObject(item,
-            jsonSettings ?? new JsonSerializerSettings
-            {
-                Formatting = Formatting.Indented, NullValueHandling = NullValueHandling.Ignore
-            });
-
-        using var stream = new MemoryStream();
-        using (var writer = new StreamWriter(stream, leaveOpen: true))
-        {
-            await writer.WriteAsync(json);
-            await writer.FlushAsync();
-            stream.Position = 0;
-
-            await fileClient.UploadAsync(stream, overwrite);
-        }
-
-        return fileClient.Path;
-    }
-
-    /// <summary>
-    ///     Stores a collection of items as a Parquet file in Azure Data Lake Storage.
-    /// </summary>
-    /// <typeparam name="T">The type of the items to store.</typeparam>
-    /// <param name="items">The collection of items to store.</param>
-    /// <param name="directoryPath">The directory path where the file will be stored.</param>
-    /// <param name="fileSystemName">The name of the file system.</param>
-    /// <param name="fileName">Optional. The name of the file. If not provided, a GUID will be used.</param>
-    /// <param name="overwrite">Whether to overwrite the file if it already exists.</param>
-    /// <returns>The path to the stored file.</returns>
-    public async Task<string> StoreItemsAsParquet<T>(
-        IEnumerable<T> items,
-        string directoryPath,
-        string fileSystemName,
-        string? fileName = null,
-        bool overwrite = true) where T : class
-    {
-        if (items == null)
-        {
-            throw new ArgumentNullException(nameof(items));
-        }
-
-        if (string.IsNullOrWhiteSpace(directoryPath))
-        {
-            throw new ArgumentException("Directory path cannot be null or empty.", nameof(directoryPath));
-        }
-
-        if (string.IsNullOrWhiteSpace(fileSystemName))
-        {
-            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
-        }
-
-        var fileSystemClient = await GetOrCreateFileSystemClientAsync(fileSystemName);
-        var directoryClient = fileSystemClient.GetDirectoryClient(directoryPath);
-        await directoryClient.CreateIfNotExistsAsync();
-
-        fileName ??= $"{Guid.NewGuid()}.parquet";
-        if (!fileName.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase))
-        {
-            fileName += ".parquet";
-        }
-
-        var fileClient = directoryClient.GetFileClient(fileName);
-
-        using var stream = new MemoryStream();
-        var schema = CreateSchema<T>();
-        var columns = CreateColumns(items, schema);
-
-        using (var parquetWriter = await ParquetWriter.CreateAsync(schema, stream))
-        {
-            using var groupWriter = parquetWriter.CreateRowGroup();
-
-            foreach (var column in columns)
-            {
-                await groupWriter.WriteColumnAsync(column);
-            }
-        }
-
-        stream.Position = 0;
+        // Use the JSON formatter to serialize the item
+        using var stream = await _jsonFormatter.SerializeAsync(item);
         await fileClient.UploadAsync(stream, overwrite);
 
+        _logger.LogInformation("Successfully stored JSON file at {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+            
         return fileClient.Path;
     }
-
-    private static ParquetSchema CreateSchema<T>()
-    {
-        var type = typeof(T);
-        var properties = type.GetProperties();
-        var fields = new List<DataField>();
-
-        foreach (var prop in properties)
-        {
-            var dataType = GetParquetDataType(prop.PropertyType);
-            fields.Add(new DataField(prop.Name, dataType,
-                prop.PropertyType.IsClass && prop.PropertyType != typeof(string)));
-        }
-
-        return new ParquetSchema(fields.ToArray());
-    }
-
-    private static Type GetParquetDataType(Type type)
-    {
-        if (type == typeof(int) || type == typeof(int?))
-        {
-            return typeof(int);
-        }
-
-        if (type == typeof(long) || type == typeof(long?))
-        {
-            return typeof(long);
-        }
-
-        if (type == typeof(float) || type == typeof(float?))
-        {
-            return typeof(float);
-        }
-
-        if (type == typeof(double) || type == typeof(double?))
-        {
-            return typeof(double);
-        }
-
-        if (type == typeof(decimal) || type == typeof(decimal?))
-        {
-            return typeof(decimal);
-        }
-
-        if (type == typeof(bool) || type == typeof(bool?))
-        {
-            return typeof(bool);
-        }
-
-        if (type == typeof(DateTime) || type == typeof(DateTime?))
-        {
-            return typeof(DateTime);
-        }
-
-        if (type == typeof(DateTimeOffset) || type == typeof(DateTimeOffset?))
-        {
-            return typeof(DateTimeOffset);
-        }
-
-        if (type == typeof(Guid) || type == typeof(Guid?))
-        {
-            return typeof(Guid);
-        }
-
-        if (type == typeof(string))
-        {
-            return typeof(string);
-        }
-
-        return typeof(string); // Default to string for complex types
-    }
-
-    private static List<DataColumn> CreateColumns<T>(IEnumerable<T> items, ParquetSchema schema) where T : class
-    {
-        var columns = new List<DataColumn>();
-        var properties = typeof(T).GetProperties();
-        var data = items.ToList();
-
-        foreach (var field in schema.GetDataFields())
-        {
-            var property = properties.FirstOrDefault(p => p.Name == field.Name);
-            if (property == null)
-            {
-                continue;
-            }
-
-            var dataType = GetParquetDataType(property.PropertyType);
-            var isNullable = Nullable.GetUnderlyingType(property.PropertyType) != null ||
-                             (!property.PropertyType.IsValueType && property.PropertyType != typeof(string));
-
-            var array = Array.CreateInstance(property.PropertyType, data.Count);
-
-            for (var i = 0; i < data.Count; i++)
-            {
-                var value = property.GetValue(data[i]);
-                array.SetValue(value ?? (isNullable ? null : GetDefaultValue(property.PropertyType)), i);
-            }
-
-            columns.Add(new DataColumn(field, array));
-        }
-
-        return columns;
-    }
-
-    private static object? GetDefaultValue(Type type)
-    {
-        return type.IsValueType ? Activator.CreateInstance(type) : null;
-    }
-
+    
     /// <inheritdoc />
     public async Task<string> UpdateJsonFile<T>(
         T item,
@@ -350,7 +190,8 @@ public class AzureDataLakeContext : IAzureDataLakeContext
             throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
         }
 
-        var fileSystemClient = await GetOrCreateFileSystemClientAsync(fileSystemName);
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
         var fileClient = fileSystemClient.GetFileClient(filePath);
 
         // Check if file exists
@@ -359,76 +200,41 @@ public class AzureDataLakeContext : IAzureDataLakeContext
             throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
         }
 
-        var json = JsonConvert.SerializeObject(
-            item,
-            jsonSettings ?? new JsonSerializerSettings
-            {
-                Formatting = Formatting.Indented,
-                NullValueHandling = NullValueHandling.Ignore
-            });
-
-        using var stream = new MemoryStream();
-        using (var writer = new StreamWriter(stream, leaveOpen: true))
-        {
-            await writer.WriteAsync(json);
-            await writer.FlushAsync();
-            stream.Position = 0;
-
-            // Upload with overwrite set to true
-            await fileClient.UploadAsync(stream, overwrite: true);
-        }
-
-        return fileClient.Path;
-    }
-
-    /// <inheritdoc />
-    public async Task<string> UpdateParquetFile<T>(
-        IEnumerable<T> items,
-        string filePath,
-        string fileSystemName) where T : class
-    {
-        if (items == null)
-        {
-            throw new ArgumentNullException(nameof(items));
-        }
-
-        if (string.IsNullOrWhiteSpace(filePath))
-        {
-            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
-        }
-
-
-        if (string.IsNullOrWhiteSpace(fileSystemName))
-        {
-            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
-        }
-
-        var fileSystemClient = await GetOrCreateFileSystemClientAsync(fileSystemName);
-        var fileClient = fileSystemClient.GetFileClient(filePath);
-
-        // Check if file exists
-        if (!await fileClient.ExistsAsync())
-        {
-            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
-        }
-
-        using var stream = new MemoryStream();
-        var schema = CreateSchema<T>();
-        var columns = CreateColumns(items, schema);
-
-        using (var parquetWriter = await ParquetWriter.CreateAsync(schema, stream))
-        {
-            using var groupWriter = parquetWriter.CreateRowGroup();
-
-            foreach (var column in columns)
-            {
-                await groupWriter.WriteColumnAsync(column);
-            }
-        }
-
-        stream.Position = 0;
+        // Use the JSON formatter to serialize the item
+        using var stream = await _jsonFormatter.SerializeAsync(item);
         await fileClient.UploadAsync(stream, overwrite: true);
+        
+        _logger.LogInformation("Successfully updated JSON file at {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
 
         return fileClient.Path;
     }
+    
+    /// <summary>
+    /// Disposes the resources used by the AzureDataLakeContext.
+    /// </summary>
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+    
+    /// <summary>
+    /// Disposes the resources used by the AzureDataLakeContext.
+    /// </summary>
+    /// <param name="disposing">True to release both managed and unmanaged resources; false to release only unmanaged resources.</param>
+    protected virtual void Dispose(bool disposing)
+    {
+        if (!_disposed)
+        {
+            if (disposing)
+            {
+                _serviceClients.Clear();
+                _fileSystemClients.Clear();
+            }
+            
+            _disposed = true;
+        }
+    }
+    
 }
