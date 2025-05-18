@@ -19,6 +19,7 @@ using AzureDataLakeTools.Storage.Annotations;
 using AzureDataLakeTools.Storage.Formatters;
 using AzureDataLakeTools.Storage.Formatters.Interfaces;
 using AzureDataLakeTools.Storage.Formatters.Json;
+using AzureDataLakeTools.Storage.Formatters.Parquet;
 
 namespace AzureDataLakeTools.Storage;
 
@@ -37,6 +38,7 @@ public class AzureDataLakeContext : IAzureDataLakeContext, IDisposable
     private readonly ConcurrentDictionary<string, DataLakeServiceClient> _serviceClients = new();
     private readonly ILogger<AzureDataLakeContext> _logger;
     private readonly IFileFormatter _jsonFormatter;
+    private readonly IParquetFileFormatter _parquetFormatter;
 
     /// <summary>
     ///     Initializes a new instance of the <see cref="AzureDataLakeContext" /> class.
@@ -50,7 +52,8 @@ public class AzureDataLakeContext : IAzureDataLakeContext, IDisposable
     public AzureDataLakeContext(
         IConfiguration configuration, 
         ILogger<AzureDataLakeContext> logger,
-        IFileFormatter? jsonFormatter = null)
+        IFileFormatter? jsonFormatter = null,
+        IParquetFileFormatter? parquetFormatter = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
@@ -70,6 +73,7 @@ public class AzureDataLakeContext : IAzureDataLakeContext, IDisposable
         
         // Initialize formatters
         _jsonFormatter = jsonFormatter ?? new JsonFileFormatter();
+        _parquetFormatter = parquetFormatter ?? new ParquetFileFormatter();
     }
 
     /// <summary>
@@ -237,4 +241,505 @@ public class AzureDataLakeContext : IAzureDataLakeContext, IDisposable
         }
     }
     
+    /// <summary>
+    /// Stores an item as a Parquet file in Azure Data Lake Storage.
+    /// </summary>
+    /// <typeparam name="T">The type of the item to store, which must implement IParquetSerializable&lt;T&gt;.</typeparam>
+    /// <param name="item">The item to store.</param>
+    /// <param name="directoryPath">The directory path where the file will be stored.</param>
+    /// <param name="fileSystemName">The name of the file system.</param>
+    /// <param name="fileName">Optional. The name of the file. If not provided, a GUID will be used.</param>
+    /// <param name="overwrite">Whether to overwrite the file if it already exists.</param>
+    /// <returns>The path to the stored file.</returns>
+    public async Task<string> StoreItemAsParquet<T>(
+        T item,
+        string directoryPath,
+        string fileSystemName,
+        string? fileName = null,
+        bool overwrite = true) where T : IParquetSerializable<T>
+    {
+        if (item == null)
+        {
+            throw new ArgumentNullException(nameof(item));
+        }
+
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            throw new ArgumentException("Directory path cannot be null or empty.", nameof(directoryPath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
+        var directoryClient = fileSystemClient.GetDirectoryClient(directoryPath);
+        await directoryClient.CreateIfNotExistsAsync();
+
+        fileName ??= $"{Guid.NewGuid()}.parquet";
+        if (!fileName.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase))
+        {
+            fileName += ".parquet";
+        }
+
+        var fileClient = directoryClient.GetFileClient(fileName);
+
+        // Use the Parquet formatter to serialize the item
+        using var stream = await _parquetFormatter.SerializeAsync(item);
+        
+        // Get the length of the stream for proper upload
+        var contentLength = stream.Length;
+        stream.Position = 0;
+        
+        try
+        {
+            if (overwrite)
+            {
+                // Try to delete if exists, but don't fail if it doesn't
+                try
+                {
+                    if (await fileClient.ExistsAsync())
+                    {
+                        await fileClient.DeleteAsync();
+                    }
+                }
+                catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathNotFound")
+                {
+                    // File doesn't exist, which is fine for our purposes
+                    _logger.LogDebug("File {Path} didn't exist when trying to delete it, continuing with upload", 
+                        fileClient.Path);
+                }
+            }
+            
+            // Upload the entire stream at once
+            await fileClient.UploadAsync(stream, overwrite: false);
+        }
+        catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathAlreadyExists" && overwrite)
+        {
+            // If the path already exists and we want to overwrite, try the delete-then-upload approach again
+            _logger.LogDebug("Path {Path} already exists, retrying with explicit delete-then-create approach", 
+                fileClient.Path);
+                
+            try
+            {
+                // Reset stream position
+                stream.Position = 0;
+                
+                // Delete the file explicitly
+                await fileClient.DeleteAsync();
+                
+                // Wait a short time to ensure deletion is processed
+                await Task.Delay(100);
+                
+                // Upload again
+                await fileClient.UploadAsync(stream, overwrite: false);
+            }
+            catch (Exception retryEx)
+            {
+                throw new InvalidOperationException($"Failed to upload Parquet file after retry: {retryEx.Message}", retryEx);
+            }
+        }
+
+        _logger.LogInformation("Successfully stored Parquet file at {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+            
+        return fileClient.Path;
+    }
+    
+    /// <summary>
+    /// Stores a collection of items as a Parquet file in Azure Data Lake Storage.
+    /// </summary>
+    /// <typeparam name="T">The type of the items to store, which must implement IParquetSerializable&lt;T&gt;.</typeparam>
+    /// <param name="items">The collection of items to store.</param>
+    /// <param name="directoryPath">The directory path where the file will be stored.</param>
+    /// <param name="fileSystemName">The name of the file system.</param>
+    /// <param name="fileName">Optional. The name of the file. If not provided, a GUID will be used.</param>
+    /// <param name="overwrite">Whether to overwrite the file if it already exists.</param>
+    /// <returns>The path to the stored file.</returns>
+    public async Task<string> StoreItemsAsParquet<T>(
+        IEnumerable<T> items,
+        string directoryPath,
+        string fileSystemName,
+        string? fileName = null,
+        bool overwrite = true) where T : IParquetSerializable<T>
+    {
+        if (items == null)
+        {
+            throw new ArgumentNullException(nameof(items));
+        }
+
+        if (!items.Any())
+        {
+            throw new ArgumentException("At least one item is required", nameof(items));
+        }
+
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            throw new ArgumentException("Directory path cannot be null or empty.", nameof(directoryPath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
+        var directoryClient = fileSystemClient.GetDirectoryClient(directoryPath);
+        await directoryClient.CreateIfNotExistsAsync();
+
+        fileName ??= $"{Guid.NewGuid()}.parquet";
+        if (!fileName.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase))
+        {
+            fileName += ".parquet";
+        }
+
+        var fileClient = directoryClient.GetFileClient(fileName);
+
+        // Use the Parquet formatter to serialize the items
+        using var stream = await _parquetFormatter.SerializeItemsAsync(items);
+        
+        // Get the length of the stream for proper upload
+        var contentLength = stream.Length;
+        stream.Position = 0;
+        
+        try
+        {
+            if (overwrite)
+            {
+                // Try to delete if exists, but don't fail if it doesn't
+                try
+                {
+                    if (await fileClient.ExistsAsync())
+                    {
+                        await fileClient.DeleteAsync();
+                    }
+                }
+                catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathNotFound")
+                {
+                    // File doesn't exist, which is fine for our purposes
+                    _logger.LogDebug("File {Path} didn't exist when trying to delete it, continuing with upload", 
+                        fileClient.Path);
+                }
+            }
+            
+            // Upload the entire stream at once
+            await fileClient.UploadAsync(stream, overwrite: false);
+        }
+        catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathAlreadyExists" && overwrite)
+        {
+            // If the path already exists and we want to overwrite, try the delete-then-upload approach again
+            _logger.LogDebug("Path {Path} already exists, retrying with explicit delete-then-create approach", 
+                fileClient.Path);
+                
+            try
+            {
+                // Reset stream position
+                stream.Position = 0;
+                
+                // Delete the file explicitly
+                await fileClient.DeleteAsync();
+                
+                // Wait a short time to ensure deletion is processed
+                await Task.Delay(100);
+                
+                // Upload again
+                await fileClient.UploadAsync(stream, overwrite: false);
+            }
+            catch (Exception retryEx)
+            {
+                throw new InvalidOperationException($"Failed to upload Parquet file after retry: {retryEx.Message}", retryEx);
+            }
+        }
+
+        _logger.LogInformation("Successfully stored Parquet file with multiple items at {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+            
+        return fileClient.Path;
+    }
+    
+    /// <summary>
+    /// Updates an existing Parquet file in Azure Data Lake Storage with new content.
+    /// </summary>
+    /// <typeparam name="T">The type of the item to update with, which must implement IParquetSerializable&lt;T&gt;.</typeparam>
+    /// <param name="item">The item containing the updated data.</param>
+    /// <param name="filePath">The path to the existing file to update.</param>
+    /// <param name="fileSystemName">The name of the file system.</param>
+    /// <returns>The path to the updated file.</returns>
+    public async Task<string> UpdateParquetFile<T>(
+        T item,
+        string filePath,
+        string fileSystemName) where T : IParquetSerializable<T>
+    {
+        if (item == null)
+        {
+            throw new ArgumentNullException(nameof(item));
+        }
+
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
+        var fileClient = fileSystemClient.GetFileClient(filePath);
+
+        // Check if file exists
+        if (!await fileClient.ExistsAsync())
+        {
+            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
+        }
+
+        // Use the Parquet formatter to serialize the item
+        using var stream = await _parquetFormatter.SerializeAsync(item);
+        
+        // Get the length of the stream for proper upload
+        var contentLength = stream.Length;
+        stream.Position = 0;
+        
+        try
+        {
+            // Try to delete if exists, but don't fail if it doesn't
+            try
+            {
+                if (await fileClient.ExistsAsync())
+                {
+                    await fileClient.DeleteAsync();
+                }
+            }
+            catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathNotFound")
+            {
+                // File doesn't exist, which is fine for our purposes
+                _logger.LogDebug("File {Path} didn't exist when trying to delete it, continuing with upload", 
+                    fileClient.Path);
+            }
+            
+            // Upload the entire stream at once
+            await fileClient.UploadAsync(stream, overwrite: false);
+        }
+        catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathAlreadyExists")
+        {
+            // If the path already exists, try the delete-then-upload approach again
+            _logger.LogDebug("Path {Path} already exists, retrying with explicit delete-then-create approach", 
+                fileClient.Path);
+                
+            try
+            {
+                // Reset stream position
+                stream.Position = 0;
+                
+                // Delete the file explicitly
+                await fileClient.DeleteAsync();
+                
+                // Wait a short time to ensure deletion is processed
+                await Task.Delay(100);
+                
+                // Upload again
+                await fileClient.UploadAsync(stream, overwrite: false);
+            }
+            catch (Exception retryEx)
+            {
+                throw new InvalidOperationException($"Failed to upload Parquet file after retry: {retryEx.Message}", retryEx);
+            }
+        }
+        
+        _logger.LogInformation("Successfully updated Parquet file at {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+
+        return fileClient.Path;
+    }
+    
+    /// <summary>
+    /// Updates an existing Parquet file in Azure Data Lake Storage with a collection of items.
+    /// </summary>
+    /// <typeparam name="T">The type of the items to update with, which must implement IParquetSerializable&lt;T&gt;.</typeparam>
+    /// <param name="items">The collection of items containing the updated data.</param>
+    /// <param name="filePath">The path to the existing file to update.</param>
+    /// <param name="fileSystemName">The name of the file system.</param>
+    /// <returns>The path to the updated file.</returns>
+    public async Task<string> UpdateParquetFileWithItems<T>(
+        IEnumerable<T> items,
+        string filePath,
+        string fileSystemName) where T : IParquetSerializable<T>
+    {
+        if (items == null)
+        {
+            throw new ArgumentNullException(nameof(items));
+        }
+
+        if (!items.Any())
+        {
+            throw new ArgumentException("At least one item is required", nameof(items));
+        }
+
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
+        var fileClient = fileSystemClient.GetFileClient(filePath);
+
+        // Check if file exists
+        if (!await fileClient.ExistsAsync())
+        {
+            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
+        }
+
+        // Use the Parquet formatter to serialize the items
+        using var stream = await _parquetFormatter.SerializeItemsAsync(items);
+        
+        // Get the length of the stream for proper upload
+        var contentLength = stream.Length;
+        stream.Position = 0;
+        
+        try
+        {
+            // Try to delete if exists, but don't fail if it doesn't
+            try
+            {
+                if (await fileClient.ExistsAsync())
+                {
+                    await fileClient.DeleteAsync();
+                }
+            }
+            catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathNotFound")
+            {
+                // File doesn't exist, which is fine for our purposes
+                _logger.LogDebug("File {Path} didn't exist when trying to delete it, continuing with upload", 
+                    fileClient.Path);
+            }
+            
+            // Upload the entire stream at once
+            await fileClient.UploadAsync(stream, overwrite: false);
+        }
+        catch (Azure.RequestFailedException ex) when (ex.ErrorCode == "PathAlreadyExists")
+        {
+            // If the path already exists, try the delete-then-upload approach again
+            _logger.LogDebug("Path {Path} already exists, retrying with explicit delete-then-create approach", 
+                fileClient.Path);
+                
+            try
+            {
+                // Reset stream position
+                stream.Position = 0;
+                
+                // Delete the file explicitly
+                await fileClient.DeleteAsync();
+                
+                // Wait a short time to ensure deletion is processed
+                await Task.Delay(100);
+                
+                // Upload again
+                await fileClient.UploadAsync(stream, overwrite: false);
+            }
+            catch (Exception retryEx)
+            {
+                throw new InvalidOperationException($"Failed to upload Parquet file after retry: {retryEx.Message}", retryEx);
+            }
+        }
+        
+        _logger.LogInformation("Successfully updated Parquet file with multiple items at {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+
+        return fileClient.Path;
+    }
+    
+    /// <summary>
+    /// Reads a Parquet file from Azure Data Lake Storage and deserializes it to an object.
+    /// </summary>
+    /// <typeparam name="T">The type to deserialize to, which must implement IParquetSerializable&lt;T&gt; and have a parameterless constructor.</typeparam>
+    /// <param name="filePath">The path to the file to read.</param>
+    /// <param name="fileSystemName">The name of the file system.</param>
+    /// <returns>The deserialized object.</returns>
+    public async Task<T> ReadParquetFile<T>(
+        string filePath,
+        string fileSystemName) where T : IParquetSerializable<T>, new()
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
+        var fileClient = fileSystemClient.GetFileClient(filePath);
+
+        // Check if file exists
+        if (!await fileClient.ExistsAsync())
+        {
+            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
+        }
+
+        // Download the file to a memory stream
+        var memoryStream = new MemoryStream();
+        await fileClient.ReadToAsync(memoryStream);
+        memoryStream.Position = 0;
+
+        // Use the Parquet formatter to deserialize the stream
+        var result = await _parquetFormatter.DeserializeAsync<T>(memoryStream);
+        
+        _logger.LogInformation("Successfully read Parquet file from {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+
+        return result;
+    }
+    
+    /// <summary>
+    /// Reads a Parquet file from Azure Data Lake Storage and deserializes it to a collection of objects.
+    /// </summary>
+    /// <typeparam name="T">The type to deserialize to, which must implement IParquetSerializable&lt;T&gt; and have a parameterless constructor.</typeparam>
+    /// <param name="filePath">The path to the file to read.</param>
+    /// <param name="fileSystemName">The name of the file system.</param>
+    /// <returns>A collection of deserialized objects.</returns>
+    public async Task<IEnumerable<T>> ReadParquetItems<T>(
+        string filePath,
+        string fileSystemName) where T : IParquetSerializable<T>, new()
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystemName))
+        {
+            throw new ArgumentException("File system name cannot be null or empty.", nameof(fileSystemName));
+        }
+
+        var fileSystemClient = GetOrCreateFileSystemClient(fileSystemName);
+        var fileClient = fileSystemClient.GetFileClient(filePath);
+
+        // Check if file exists
+        if (!await fileClient.ExistsAsync())
+        {
+            throw new FileNotFoundException($"The file {filePath} was not found in the file system {fileSystemName}.");
+        }
+
+        // Download the file to a memory stream
+        var memoryStream = new MemoryStream();
+        await fileClient.ReadToAsync(memoryStream);
+        memoryStream.Position = 0;
+
+        // Use the Parquet formatter to deserialize the stream
+        var result = await _parquetFormatter.DeserializeItemsAsync<T>(memoryStream);
+        
+        _logger.LogInformation("Successfully read Parquet file with multiple items from {Path} in file system {FileSystem}", 
+            fileClient.Path, fileSystemName);
+
+        return result;
+    }
 }
