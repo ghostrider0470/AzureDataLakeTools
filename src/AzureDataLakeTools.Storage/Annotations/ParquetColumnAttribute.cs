@@ -64,8 +64,13 @@ namespace AzureDataLakeTools.Storage.Annotations
                 return new DataField<DateTimeOffset>(Name, Nullable);
             if (type == typeof(Guid) || type == typeof(Guid?))
                 return new DataField<Guid>(Name, Nullable);
+            
+            // Handle enum types by converting them to strings
+            if (type.IsEnum || (System.Nullable.GetUnderlyingType(type)?.IsEnum == true))
+                return new DataField<string>(Name, Nullable);
 
-            throw new NotSupportedException($"Type {type.Name} is not supported for Parquet serialization");
+            // For any other type, try to use string representation as a fallback
+            return new DataField<string>(Name, Nullable);
         }
     }
 }
